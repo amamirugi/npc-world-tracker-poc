@@ -2,6 +2,8 @@
 
 Last reviewed: 2026-09-06
 
+> **현재 재개 지점 — 2026-09-06:** 태현의 P0 승인 후 v0.4 P1 구현과 모의 회귀 검증 23개를 마쳤다. [PR #1](https://github.com/amamirugi/npc-world-tracker-poc/pull/1)의 [최신 handoff](https://github.com/amamirugi/npc-world-tracker-poc/blob/work/v0.4-backstage/DECISIONS.md)를 읽고 **실제 RisuAI + Hayaku 인수 검증(P2)**부터 이어간다. 아래 본문은 재개 당시 v0.3.3 기준 기록이며, P0/P1을 반복하지 않는다. main의 플러그인 JS는 아직 v0.3.3이고 v0.4 업데이트 배포·실환경 설치는 수행하지 않았다.
+
 This is the project handoff document for `amamirugi/npc-world-tracker-poc`. It is written for an AI instance that has no access to the conversation that produced these decisions.
 
 ## 확정된 결정
