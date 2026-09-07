@@ -8,13 +8,15 @@ NPC World Tracker PoC의 버전별 변경 기록입니다.
 
 ### Added — v0.4.0 implementation (not yet released)
 
+- Default RisuAI configured submodel through runLLMModel; retained optional custom API settings. Native response adapters and submodel recursion/failure regression coverage.
+
 - Backstage pressure/constraints/review window/wake metadata and Hot/Warm/Cold/Archived attention scheduling.
 - Projection-only main context with optional short-lived soft hooks and supported arrived hard effects.
 - Separate occurrence, arrival and delivery states; no severity-based arrival or full-state/brief injection.
 - Durable request receipts, successful-output acknowledgment, bounded reroll snapshots and stale auxiliary/write rejection.
 - Separate v4 storage preserving the original v0.3.3 key; pending queue retention without silent eviction.
 - Dashboard attention, event delivery, projection size and NPC archive/resume controls.
-- 23 Node VM regression tests; live RisuAI/Hayaku acceptance remains pending.
+- 27 Node VM regression tests; live RisuAI/Hayaku acceptance remains pending.
 
 ### Planned
 

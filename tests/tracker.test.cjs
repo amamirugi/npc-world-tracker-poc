@@ -34,9 +34,9 @@ async function harness(shared) {
   await vm.runInContext(injected, sandbox);
   const api = sandbox.api;
   const context = await api.getCurrentContext();
-  const config = api.normalizeConfig({ endpoint: 'https://example.invalid/v1/chat/completions', model: 'test', maxTokens: 4000, warmBatchSize: 4, debugLogging: false });
+  const config = api.normalizeConfig({ modelSource: 'custom', endpoint: 'https://example.invalid/v1/chat/completions', model: 'test', maxTokens: 4000, warmBatchSize: 4, debugLogging: false });
   await api.saveConfig(config);
-  return { api, context, config, store, chat, calls, ui, setResponder: (fn) => { respond = fn; },
+  return { api, Risuai, context, config, store, chat, calls, ui, setResponder: (fn) => { respond = fn; },
     settle: async () => { const q = api.trackingQueues.get(context.scopeId); if (q) await q; } };
 }
 function npc(id = 'n1', overrides = {}) {
@@ -244,4 +244,50 @@ test('manual reanalysis keeps the response tick and existing delivery acknowledg
 test('oversized exposure is rejected instead of silently truncated', async () => {
   const h = await harness(); const e = event(); e.arrival.exposure = 'x'.repeat(401);
   assert.throws(() => result(h, [patch()], [e]), /길이/);
+});
+
+
+test('RisuAI default needs no endpoint or key; coverage repair stays on submodel', async () => {
+  const h = await harness(); const config = h.api.normalizeConfig({});
+  assert.equal(config.modelSource, 'risu'); let calls = 0;
+  h.Risuai.runLLMModel = async (body) => {
+    assert.equal(body.mode, 'submodel'); assert.equal(body.allowPlugins, true);
+    assert.equal(body.model, undefined); assert.equal(body.max_tokens, undefined);
+    assert.equal(body.messages[0].role, 'system');
+    return { type: 'success', result: JSON.stringify({ npc_updates: ++calls === 1 ? [] : [patch()], events: [], soft_signals: [] }) };
+  };
+  await h.api.callTrackerModel(config, '', state(h), snapshot());
+  assert.equal(calls, 2); assert.equal(h.calls.length, 0);
+});
+test('native response variants preserve independent candidates and stream snapshots', async () => {
+  const h = await harness(); const expected = '{"npc_updates":[]}';
+  assert.equal(await h.api.risuCompletionText(expected), expected);
+  assert.equal(await h.api.risuCompletionText({ type: 'multiline', result: [['user', '{}'], ['char', 'invalid'], ['assistant', expected]] }), expected);
+  let released = false;
+  const chunks = [{ '0': '{"npc_' }, { '0': expected, '1': 'alternative' }];
+  assert.equal(await h.api.risuCompletionText({ type: 'streaming', result: { getReader: () => ({
+    read: async () => chunks.length ? { value: chunks.shift(), done: false } : { done: true },
+    releaseLock: () => { released = true; }
+  }) } }), expected);
+  assert.equal(released, true);
+  await assert.rejects(h.api.risuCompletionText({ success: false, content: 'private provider error' }), /RisuAI/);
+  await assert.rejects(h.api.risuCompletionText({ type: 'unknown' }), /응답 형식/);
+});
+test('native failure preserves state and never falls back to stored custom endpoint', async () => {
+  const h = await harness(); await h.api.saveConfig({ ...h.config, modelSource: 'risu' });
+  await h.api.saveState(h.context, state(h));
+  h.Risuai.runLLMModel = async () => { throw new Error('private provider error'); };
+  await h.api.runTracking(h.context, snapshot(), false);
+  assert.equal((await h.api.loadState(h.context)).npcs[0].lastSourceTurnHash, '');
+  assert.equal(h.calls.length, 0);
+  delete h.Risuai.runLLMModel;
+  await assert.rejects(h.api.callTrackerModel(h.api.normalizeConfig({}), '', state(h), snapshot()), /지원하지/);
+});
+test('submodel hooks neither inject projection nor recursively track', async () => {
+  const h = await harness(); await h.api.saveState(h.context, state(h, [npc()], [event()]));
+  const messages = [{ role: 'user', content: 'private tracker input' }];
+  const before = JSON.stringify([...h.store]);
+  assert.equal(await h.api.handleBeforeRequest(messages, 'submodel'), messages);
+  await h.api.handleAfterRequest('private tracker output', 'submodel');
+  assert.equal(JSON.stringify([...h.store]), before); assert.equal(h.calls.length, 0);
 });

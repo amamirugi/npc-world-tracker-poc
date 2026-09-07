@@ -30,6 +30,7 @@
   const MAX_DEBUG_STORAGE_CHARS = 3000000;
 
   const DEFAULT_CONFIG = Object.freeze({
+    modelSource: "risu",
     enabled: true,
     endpoint: "",
     model: "",
@@ -516,6 +517,7 @@
       candidate && typeof candidate === "object" ? candidate : DEFAULT_CONFIG;
     return {
       enabled: source.enabled !== false,
+      modelSource: source.modelSource === "custom" ? "custom" : "risu",
       endpoint: text(source.endpoint, 1000),
       model: text(source.model, 300),
       warmBatchSize: clampInt(source.warmBatchSize, 1, 12, 4),
@@ -1185,8 +1187,8 @@
       chatName: context.chatName,
       sourceTurnHash: snapshot.sourceTurnHash,
       contextHash: snapshot.contextHash,
-      endpoint: sanitizedEndpoint(config.endpoint),
-      model: config.model,
+      endpoint: config.modelSource === "risu" ? "RisuAI runLLMModel" : sanitizedEndpoint(config.endpoint),
+      model: config.modelSource === "risu" ? "RisuAI 보조모델" : config.model,
       npcCount: state.npcs.length,
       attempts: [],
       error: "",
@@ -1968,6 +1970,45 @@ JSON schema:
     return parts.join("\n");
   }
 
+  // Response variants verified against the supplied KoCoEMon v1.15.14.
+  async function risuCompletionText(response) {
+    if (typeof response === "string") return response;
+    if (!response || response.success === false || response.type === "fail") {
+      throw new Error("RisuAI 보조모델 요청에 실패했어요. RisuAI 모델 설정을 확인해 주세요.");
+    }
+    if (response.type === "success" && typeof response.result === "string") return response.result;
+    if (response.type === "multiline" && Array.isArray(response.result)) {
+      const candidates = response.result.filter((row) => Array.isArray(row) &&
+        ["char", "assistant"].includes(String(row[0]).toLowerCase()) && typeof row[1] === "string");
+      for (const row of candidates) {
+        try { parseJsonObject(row[1]); return row[1]; } catch { /* Try the next independent candidate. */ }
+      }
+      return candidates[0]?.[1] || "";
+    }
+    if (response.type === "streaming" && typeof response.result?.getReader === "function") {
+      const reader = response.result.getReader();
+      const latest = {};
+      let plain = "";
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (typeof value === "string") {
+            plain = value.startsWith(plain) || value.length >= plain.length ? value : plain + value;
+          } else if (value && typeof value === "object") {
+            for (const [key, candidate] of Object.entries(value)) {
+              if (typeof candidate === "string") latest[key] = candidate;
+            }
+          }
+        }
+      } finally {
+        if (typeof reader.releaseLock === "function") reader.releaseLock();
+      }
+      return plain.trim() ? plain : latest["0"] || Object.values(latest).sort((a, b) => b.length - a.length)[0] || "";
+    }
+    throw new Error("지원하지 않는 RisuAI 보조모델 응답 형식이에요.");
+  }
+
   async function requestTrackerCompletion(
     config,
     apiKey,
@@ -1977,7 +2018,8 @@ JSON schema:
     repairIssues = null,
     repairInstruction = "",
   ) {
-    const body = {
+    const nativeModel = config.modelSource === "risu";
+    const body = nativeModel ? { messages, mode: "submodel", allowPlugins: true } : {
       model: config.model,
       temperature: config.temperature,
       max_tokens: config.maxTokens,
@@ -2030,40 +2072,56 @@ JSON schema:
     const startedAt = Date.now();
 
     try {
-      const response = await withTimeout(
-        Risuai.nativeFetch(config.endpoint, {
-          method: "POST",
-          headers,
-          body: JSON.stringify(body),
-        }),
-        config.timeoutMs,
-        "NPC tracker request",
-      );
-      const headersAt = Date.now();
-      if (attempt) {
-        attempt.headersMs = Math.max(0, headersAt - startedAt);
-        attempt.httpStatus = firstFiniteNumber(response?.status);
-      }
+      let payload = {};
+      let rawContent;
+      if (nativeModel) {
+        if (typeof Risuai.runLLMModel !== "function") {
+          throw new Error("이 RisuAI 환경은 runLLMModel을 지원하지 않아요. RisuAI를 업데이트하거나 직접 설정 API를 선택해 주세요.");
+        }
+        rawContent = await withTimeout((async () => {
+          let response;
+          try { response = await Risuai.runLLMModel(body); }
+          catch { throw new Error("RisuAI 보조모델 호출에 실패했어요. RisuAI 모델 설정을 확인해 주세요."); }
+          payload = { model: typeof response?.model === "string" ? response.model : "" };
+          return risuCompletionText(response);
+        })(), config.timeoutMs, "RisuAI 보조모델 요청");
+      } else {
+        const response = await withTimeout(
+          Risuai.nativeFetch(config.endpoint, {
+            method: "POST",
+            headers,
+            body: JSON.stringify(body),
+          }),
+          config.timeoutMs,
+          "NPC tracker request",
+        );
+        const headersAt = Date.now();
+        if (attempt) {
+          attempt.headersMs = Math.max(0, headersAt - startedAt);
+          attempt.httpStatus = firstFiniteNumber(response?.status);
+        }
 
-      if (!response?.ok) {
-        // Do not read or surface arbitrary remote error bodies: a
-        // misconfigured proxy can echo credentials or request headers.
-        throw new Error(`보조모델 HTTP ${response?.status || "error"}`);
-      }
+        if (!response?.ok) {
+          // Do not read or surface arbitrary remote error bodies: a
+          // misconfigured proxy can echo credentials or request headers.
+          throw new Error(`보조모델 HTTP ${response?.status || "error"}`);
+        }
 
-      const payload = await response.json();
+        payload = await response.json();
+        rawContent = payload?.choices?.[0]?.message?.content;
+        if (Array.isArray(rawContent)) {
+          rawContent = rawContent
+            .map((part) => part?.text || part?.content || "")
+            .join("");
+        }
+        rawContent =
+          rawContent ??
+          payload?.choices?.[0]?.text ??
+          payload?.output_text ??
+          payload?.response;
+
+      }
       const finishedAt = Date.now();
-      let rawContent = payload?.choices?.[0]?.message?.content;
-      if (Array.isArray(rawContent)) {
-        rawContent = rawContent
-          .map((part) => part?.text || part?.content || "")
-          .join("");
-      }
-      rawContent =
-        rawContent ??
-        payload?.choices?.[0]?.text ??
-        payload?.output_text ??
-        payload?.response;
 
       const responseCapture = captureDebugText(rawContent ?? "", apiKey);
       if (attempt) {
@@ -2114,17 +2172,19 @@ JSON schema:
     debugRun = null,
     trackingMode = "automatic",
   ) {
-    if (!config.endpoint) throw new Error("보조모델 endpoint가 비어 있어.");
-    if (!config.model) throw new Error("보조모델 이름이 비어 있어.");
+    if (config.modelSource !== "risu") {
+      if (!config.endpoint) throw new Error("보조모델 endpoint가 비어 있어.");
+      if (!config.model) throw new Error("보조모델 이름이 비어 있어.");
 
-    let endpointUrl;
-    try {
-      endpointUrl = new URL(config.endpoint);
-    } catch {
-      throw new Error("보조모델 endpoint URL이 올바르지 않아.");
-    }
-    if (!["http:", "https:"].includes(endpointUrl.protocol)) {
-      throw new Error("보조모델 endpoint는 http 또는 https여야 해.");
+      let endpointUrl;
+      try {
+        endpointUrl = new URL(config.endpoint);
+      } catch {
+        throw new Error("보조모델 endpoint URL이 올바르지 않아.");
+      }
+      if (!["http:", "https:"].includes(endpointUrl.protocol)) {
+        throw new Error("보조모델 endpoint는 http 또는 https여야 해.");
+      }
     }
 
     const recentScene = [
@@ -2375,7 +2435,7 @@ JSON schema:
     await refreshChatButton(context, state);
     await renderUiIfOpen();
     try {
-      const apiKey = await getApiKey();
+      const apiKey = config.modelSource === "custom" ? await getApiKey() : "";
       const combined = { patches: [], events: [], softSignals: [], selectedIds: selection.map((npc) => npc.id) };
       // Detailed snapshots are large: never silently truncate Hot to the Warm budget.
       const batchSize = Math.max(1, Math.min(4, Math.floor(config.maxTokens / 800)));
@@ -2941,7 +3001,7 @@ JSON schema:
           background: var(--bg);
           color: var(--text);
         }
-        button, input, textarea { font: inherit; }
+        button, input, select, textarea { font: inherit; }
         button { touch-action: manipulation; }
         .shell {
           width: min(920px, 100%);
@@ -3002,7 +3062,7 @@ JSON schema:
           color: var(--muted);
           font-size: 12px;
         }
-        input, textarea {
+        input, select, textarea {
           width: 100%;
           min-height: 44px;
           border: 1px solid var(--border);
@@ -3012,7 +3072,7 @@ JSON schema:
           padding: 10px 11px;
           outline: none;
         }
-        input:focus, textarea:focus { border-color: var(--accent-2); }
+        input:focus, select:focus, textarea:focus { border-color: var(--accent-2); }
         textarea { min-height: 78px; resize: vertical; }
         .button {
           min-height: 44px;
@@ -3474,6 +3534,13 @@ JSON schema:
           <summary>보조모델 및 주입 설정</summary>
           <div class="details-body">
             <div class="grid">
+              <label style="grid-column:1/-1">보조모델 연결
+                <select id="cfg-model-source">
+                  <option value="risu" ${config.modelSource === "risu" ? "selected" : ""}>RisuAI에 설정된 보조모델 (기본)</option>
+                  <option value="custom" ${config.modelSource === "custom" ? "selected" : ""}>직접 설정 API</option>
+                </select>
+              </label>
+              <div class="sub" style="grid-column:1/-1">RisuAI 연결은 별도 키가 필요 없고 생성 설정도 RisuAI를 따릅니다. 아래 endpoint·Model·API key는 직접 설정 API에서만 사용합니다.</div>
               <label style="grid-column:1/-1">OpenAI-compatible chat completions endpoint
                 <input id="cfg-endpoint" value="${escapeHtml(config.endpoint)}" placeholder="https://example.com/v1/chat/completions">
               </label>
@@ -3483,7 +3550,7 @@ JSON schema:
               </label>
               <label>Warm 순환 평가 수<input id="cfg-warm" type="number" min="1" max="12" value="${config.warmBatchSize}"></label>
               <label>최근 장면 턴 수<input id="cfg-recent" type="number" min="1" max="12" value="${config.recentTurns}"></label>
-              <label>Max tokens<input id="cfg-max-tokens" type="number" min="300" max="4000" value="${config.maxTokens}"></label>
+              <label>배치 예산 / 직접 API Max tokens<input id="cfg-max-tokens" type="number" min="300" max="4000" value="${config.maxTokens}"></label>
             </div>
             <label style="display:flex;grid-template-columns:auto 1fr;align-items:center;margin-top:12px">
               <input id="cfg-enabled" type="checkbox" style="width:20px;min-height:20px" ${config.enabled ? "checked" : ""}>
@@ -3636,7 +3703,8 @@ JSON schema:
     document.getElementById("save-config").onclick = async () => {
       try {
         const endpoint = document.getElementById("cfg-endpoint").value.trim();
-        if (endpoint) {
+        const modelSource = document.getElementById("cfg-model-source").value;
+        if (modelSource === "custom" && endpoint) {
           const url = new URL(endpoint);
           if (!["http:", "https:"].includes(url.protocol)) {
             throw new Error("endpoint는 http 또는 https여야 해.");
@@ -3644,6 +3712,7 @@ JSON schema:
         }
         await saveConfig({
           ...config,
+          modelSource,
           enabled: document.getElementById("cfg-enabled").checked,
           debugLogging: document.getElementById("cfg-debug").checked,
           endpoint,

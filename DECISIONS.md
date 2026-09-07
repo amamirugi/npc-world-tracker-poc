@@ -60,6 +60,10 @@ KoCoEMon에서 재사용할 것은 기능적 아이디어와 UI/스케줄링 패
 
 태현이 다섯 계약을 검토한 뒤 구현 진행을 승인했다. 구체 계약은 [v0.4 설계](docs/V0_4_DESIGN.md)가 소유한다. 기존 필드 유지, Hot 전부 + Warm 순환, soft/hard projection, occurrence/arrival/delivery 분리, Hayaku 장기기억 비중복을 확정했다.
 
+### 6. RisuAI 보조모델 연결 (2026-09-07)
+
+태현의 요청으로 RisuAI에 설정된 보조모델을 지원한다. 구현 기본값은 `modelSource: risu`이며, 첨부 KoCoEMon v1.15.14에서 확인한 `runLLMModel({ messages, mode: "submodel", allowPlugins: true })` 호출 경로를 사용한다. 기존 endpoint/model/key는 보존하고 `직접 설정 API` 선택 시 사용한다. RisuAI 연결은 별도 키를 읽지 않으며 생성 파라미터는 host 설정을 따른다. tracker의 maxTokens 값은 이 모드에서 배치 예산으로만 사용한다. 실패 시 다른 제공자로 자동 전환하지 않는다. 실제 host 및 다른 플러그인의 submodel hook 상호작용은 P2에서 확인한다.
+
 ## 기각된 대안
 
 ### KoCoEMon을 그대로 Hayaku와 상시 병용
@@ -89,7 +93,7 @@ KoCoEMon에서 재사용할 것은 기능적 아이디어와 UI/스케줄링 패
 - request envelope와 pre-response snapshot, 성공 응답 ack, request epoch와 storage revision을 추가했다. 실패/동일 입력 retry/reload/reroll 및 같은 작중 시점의 수동 재분석을 모의 검증했다.
 - v3 원본 키를 보존하고 v4 키를 별도로 쓴다. 기존 이벤트는 uncertain/pending으로 이전하고 legacy brief는 주입하지 않는다.
 - UI에 attention, pressure/constraints/wake, 전달 대기/완료, 최근 projection과 문자 수를 추가했다. 전체 상태 강제 주입을 제거하고 NPC 비활성/재개를 추가했다.
-- 자동 검증: Node syntax 및 `tests/tracker.test.cjs` 23개 PASS. 상세 검증 방법과 한계는 [검증·조작 문서](docs/V0_4_VALIDATION.md)를 따른다.
+- 자동 검증: Node syntax 및 `tests/tracker.test.cjs` 27개 PASS. 상세 검증 방법과 한계는 [검증·조작 문서](docs/V0_4_VALIDATION.md)를 따른다.
 - KoCoEMon v1.15.14는 제공된 코드에서 attention과 offscreen/arrival 분리를 확인하는 데 사용했다. 코드·의존성을 이식하거나 메인 world-state injection을 복제하지 않았다.
 
 ## 이어받을 다음 작업
