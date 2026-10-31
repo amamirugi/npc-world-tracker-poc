@@ -1,0 +1,17 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+
+# Dependencies and build output
+node_modules/
+.wrangler/
+__pycache__/
+*.py[cod]
+.venv/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
